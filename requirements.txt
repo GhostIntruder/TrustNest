@@ -2,3 +2,4 @@ Flask
 flask-cors
 requests
 googletrans==4.0.2
+gunicorn==21.2.0
