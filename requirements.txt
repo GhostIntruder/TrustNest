@@ -1,4 +1,4 @@
 Flask
 flask-cors
 requests
-googletrans==4.0.0rc1
+googletrans==4.0.2
