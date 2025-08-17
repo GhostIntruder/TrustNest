@@ -14,7 +14,6 @@ class User(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-
 class Document(db.Model):
     __tablename__ = "document"
 
@@ -30,3 +29,8 @@ class Document(db.Model):
 
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     user = db.relationship("User", backref=db.backref("documents", lazy=True))
+    
+    # New verification fields (optional - add these if you want detailed verification data)
+    verification_score = db.Column(db.Float, default=0.0)  # Score out of 100
+    verification_details = db.Column(db.Text)  # JSON string with detailed results
+    verified_at = db.Column(db.DateTime)

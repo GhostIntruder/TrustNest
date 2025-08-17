@@ -16,7 +16,13 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_mail import Mail, Message
 from flask_jwt_extended import decode_token
-
+import PyPDF2
+import io
+import base64
+import re
+from datetime import datetime
+from docx import Document as DocxDocument
+import hashlib
 
 
 
@@ -280,7 +286,7 @@ def login():
         return jsonify({"error": "Invalid email or password"}), 401
 
     access_token = create_access_token(identity=user.id, expires_delta=timedelta(hours=1))
-    return jsonify({"token": access_token, "user": {"firstName": user.first_name, "lastName": user.last_name, "email": user.email}})
+    return jsonify({"token": access_token, "user": { "id": user.id, "firstName": user.first_name, "lastName": user.last_name, "email": user.email}})
 
 #---- forget password ----
 @app.route("/forgot-password", methods=["POST"])
@@ -317,27 +323,777 @@ def forgot_password():
 
 
 
-# ---------------- DOCUMENT UPLOAD ----------------
-@app.route("/upload", methods=["POST"])
-def upload_document():
-    data = request.get_json()
-    if not data.get("filename") or not data.get("file_hash") or not data.get("user_id"):
-        return jsonify({"error": "Filename, file hash, and user ID are required"}), 400
-    if not User.query.get(data["user_id"]):
-        return jsonify({"error": "User not found"}), 404
-    if Document.query.filter_by(file_hash=data["file_hash"]).first():
-        return jsonify({"error": "Document with this hash already exists"}), 400
-    new_document = Document(
-        filename=data["filename"],
-        file_hash=data["file_hash"],
-        user_id=data["user_id"],
-        originality_status="Pending"
-    )
-    db.session.add(new_document)
-    db.session.commit()
-    return jsonify({"message": "Document uploaded successfully"}), 201
-
-
+# Function to verify tenancy agreements
+def verify_tenancy_agreement(file_content, filename):
+    """
+    Simple tenancy agreement verification
+    Returns a score and detailed analysis
+    """
     
+    # Extract text from PDF
+    text = ""
+    try:
+        if filename.lower().endswith('.pdf'):
+            pdf_file = io.BytesIO(base64.b64decode(file_content))
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        
+        elif filename.lower().endswith('.docx'):
+            # Use python-docx for Word documents
+            docx_file = io.BytesIO(base64.b64decode(file_content))
+            doc = DocxDocument(docx_file)
+            text = "\n".join([p.text for p in doc.paragraphs])
+
+        else:
+            # For other formats, assume it's already text
+            text = file_content
+            
+        text = text.lower()  # Convert to lowercase for matching
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Could not process document: {str(e)}",
+            "score": 0
+        }
+    
+    # Define what we're looking for
+    verification_checks = {
+        "document_type": {
+            "keywords": ["tenancy agreement", "lease agreement", "rental agreement"],
+            "found": False,
+            "weight": 20
+        },
+        "parties": {
+            "keywords": ["landlord", "tenant", "lessor", "lessee"],
+            "found": False,
+            "weight": 15
+        },
+        "property_address": {
+            "keywords": ["property", "address", "located at", "premises", "street", "avenue"],
+            "found": False,
+            "weight": 15
+        },
+        "rent_amount": {
+            "keywords": ["rent", "₦", "naira", "monthly", "payment"],
+            "found": False,
+            "weight": 15
+        },
+        "duration": {
+            "keywords": ["month", "year", "period", "term", "duration", "commence"],
+            "found": False,
+            "weight": 10
+        },
+        "signatures": {
+            "keywords": ["signature", "signed", "witness", "date"],
+            "found": False,
+            "weight": 10
+        },
+        "legal_terms": {
+            "keywords": ["terms", "conditions", "covenant", "breach", "notice"],
+            "found": False,
+            "weight": 10
+        },
+        "registration": {
+            "keywords": ["register", "stamp duty", "government", "state"],
+            "found": False,
+            "weight": 5
+        }
+    }
+    
+    # Check for each requirement
+    total_score = 0
+    max_score = sum(check["weight"] for check in verification_checks.values())
+    found_elements = []
+    missing_elements = []
+    
+    for element, check in verification_checks.items():
+        found = any(keyword in text for keyword in check["keywords"])
+        check["found"] = found
+        
+        if found:
+            total_score += check["weight"]
+            found_elements.append(element.replace("_", " ").title())
+        else:
+            missing_elements.append(element.replace("_", " ").title())
+    
+    # Calculate percentage score
+    score = (total_score / max_score) * 100
+    
+    # Additional checks for red flags
+    red_flags = []
+    
+    # Check for extremely low/high rent (basic validation)
+    rent_numbers = re.findall(r'₦?\s*(\d{1,3}(?:,\d{3})*)', text)
+    if rent_numbers:
+        try:
+            amounts = [int(num.replace(',', '')) for num in rent_numbers]
+            max_amount = max(amounts)
+            if max_amount < 10000:  # Very low rent
+                red_flags.append("Unusually low rent amount detected")
+            elif max_amount > 10000000:  # Very high rent
+                red_flags.append("Unusually high rent amount detected")
+        except:
+            pass
+    
+    # Check for suspicious patterns
+    if "pay now" in text or "urgent" in text:
+        red_flags.append("Contains urgent payment language")
+    
+    if len(text) < 500:  # Very short document
+        red_flags.append("Document appears too short for a complete agreement")
+    
+    # Determine status
+    if score >= 80:
+        status = "Likely Authentic"
+        color = "green"
+    elif score >= 60:
+        status = "Needs Review"
+        color = "orange"
+    else:
+        status = "Suspicious"
+        color = "red"
+    
+    return {
+        "status": "success",
+        "verification_result": {
+            "score": round(score, 1),
+            "status": status,
+            "color": color,
+            "found_elements": found_elements,
+            "missing_elements": missing_elements,
+            "red_flags": red_flags,
+            "recommendations": generate_recommendations(score, missing_elements, red_flags)
+        }
+    }
+
+def generate_recommendations(score, missing_elements, red_flags):
+    """Generate recommendations based on verification results"""
+    recommendations = []
+    
+    if score < 60:
+        recommendations.append("Document requires thorough review before proceeding")
+    
+    if "Document Type" in missing_elements:
+        recommendations.append("Ensure document is clearly titled as a tenancy agreement")
+    
+    if "Parties" in missing_elements:
+        recommendations.append("Verify landlord and tenant details are clearly stated")
+    
+    if "Property Address" in missing_elements:
+        recommendations.append("Confirm property address is complete and accurate")
+    
+    if "Rent Amount" in missing_elements:
+        recommendations.append("Ensure rent amount and payment terms are specified")
+    
+    if red_flags:
+        recommendations.append("Address red flag issues before finalizing agreement")
+    
+    if score >= 80:
+        recommendations.append("Document appears to meet basic requirements")
+    
+    return recommendations
+
+# Add this new route to your existing Flask app
+@app.route("/api/verify-document", methods=["POST"])
+def verify_document():
+    """
+    Endpoint to verify tenancy agreement documents
+    Expects: file_content (base64), filename, document_id
+    """
+    try:
+        data = request.get_json()
+        
+        if not data.get("file_content") or not data.get("filename"):
+            return jsonify({"error": "File content and filename are required"}), 400
+        
+        # Run verification
+        result = verify_tenancy_agreement(data["file_content"], data["filename"])
+        
+        # Update document in database if document_id provided
+        if data.get("document_id") and result["status"] == "success":
+            document = Document.query.get(data["document_id"])
+            if document:
+                verification_result = result["verification_result"]
+                # Map to your enum values
+                status_mapping = {
+                    "Likely Authentic": "Original",
+                    "Needs Review": "Pending", 
+                    "Suspicious": "Fake"
+                }
+                document.originality_status = status_mapping.get(verification_result["status"], "Pending")
+                db.session.commit()
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Verification failed: {str(e)}"
+        }), 500
+
+# Replace your existing upload route with this complete file upload and verification
+@app.route("/upload-and-verify", methods=["POST"])
+def upload_and_verify_document():
+    """
+    Complete file upload and verification endpoint
+    Handles multipart file upload, processes immediately, and returns verification results
+    """
+    try:
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        
+        file = request.files['file']
+        user_id = request.form.get('user_id')
+        
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+            
+        if not user_id:
+            return jsonify({"error": "User ID is required"}), 400
+        
+        # Check if user exists
+        if not User.query.get(user_id):
+            return jsonify({"error": "User not found"}), 404
+        
+        # Validate file type
+        allowed_extensions = {'pdf', 'doc', 'docx', 'txt'}
+        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
+            return jsonify({"error": "File type not supported. Use PDF, DOC, DOCX, or TXT"}), 400
+        
+        # Read file content
+        file_content = file.read()
+        
+        # Generate file hash
+        import hashlib
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        # Check for duplicate document
+        existing_doc = Document.query.filter_by(file_hash=file_hash).first()
+        if existing_doc:
+            return jsonify({
+                "error": "Document already exists in the system",
+                "existing_document_id": existing_doc.id,
+                "uploaded_by": f"{existing_doc.user.first_name} {existing_doc.user.last_name}",
+                "upload_date": existing_doc.uploaded_at.isoformat()
+            }), 409
+        
+        # Convert file content to base64 for verification
+        import base64
+        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+        
+        # Run verification
+        verification_result = verify_tenancy_agreement(file_content_b64, file.filename)
+        
+        if verification_result["status"] == "error":
+            return jsonify(verification_result), 400
+        
+        # Map verification status to your enum values
+        verification_data = verification_result["verification_result"]
+        status_mapping = {
+            "Likely Authentic": "Original",
+            "Needs Review": "Pending", 
+            "Suspicious": "Fake"
+        }
+        
+        # Create document record
+        new_document = Document(
+            filename=file.filename,
+            file_hash=file_hash,
+            user_id=int(user_id),
+            originality_status=status_mapping.get(verification_data["status"], "Pending")
+        )
+        
+        db.session.add(new_document)
+        db.session.commit()
+        
+        # Return complete response with verification results
+        return jsonify({
+            "success": True,
+            "message": "Document uploaded and verified successfully",
+            "document": {
+                "id": new_document.id,
+                "filename": new_document.filename,
+                "file_hash": new_document.file_hash,
+                "status": new_document.originality_status,
+                "uploaded_at": new_document.uploaded_at.isoformat()
+            },
+            "verification": {
+                "score": verification_data["score"],
+                "status": verification_data["status"],
+                "color": verification_data["color"],
+                "found_elements": verification_data["found_elements"],
+                "missing_elements": verification_data["missing_elements"],
+                "red_flags": verification_data["red_flags"],
+                "recommendations": verification_data["recommendations"],
+                "summary": f"Document scored {verification_data['score']}% and is classified as '{verification_data['status']}'"
+            }
+        }), 201
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Upload and verification failed: {str(e)}"
+        }), 500
+
+# Get user documents with verification status
+@app.route("/api/user-documents/<int:user_id>", methods=["GET"])
+def get_user_documents(user_id):
+    """Get all documents uploaded by a user with their verification status"""
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        documents = Document.query.filter_by(user_id=user_id).order_by(Document.uploaded_at.desc()).all()
+        
+        documents_data = []
+        for doc in documents:
+            documents_data.append({
+                "id": doc.id,
+                "filename": doc.filename,
+                "status": doc.originality_status,
+                "uploaded_at": doc.uploaded_at.isoformat(),
+                "file_hash": doc.file_hash[:16] + "..."  # Show partial hash for security
+            })
+        
+        return jsonify({
+            "success": True,
+            "user": f"{user.first_name} {user.last_name}",
+            "total_documents": len(documents_data),
+            "documents": documents_data
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch documents: {str(e)}"
+        }), 500
+
+# Get detailed verification results for a specific document
+@app.route("/api/document-details/<int:document_id>", methods=["GET"])
+def get_document_details(document_id):
+    """Get detailed information about a specific document"""
+    try:
+        document = Document.query.get(document_id)
+        if not document:
+            return jsonify({"error": "Document not found"}), 404
+        
+        return jsonify({
+            "success": True,
+            "document": {
+                "id": document.id,
+                "filename": document.filename,
+                "status": document.originality_status,
+                "uploaded_at": document.uploaded_at.isoformat(),
+                "uploaded_by": f"{document.user.first_name} {document.user.last_name}",
+                "file_hash": document.file_hash
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch document details: {str(e)}"
+        }), 500
+
+# ============================================================================
+# LAND TITLE VERIFICATION SYSTEM  
+# ============================================================================
+
+def verify_land_title_document(file_content, filename):
+    """
+    Verify Nigerian land title documents (C of O, Governor's Consent, Survey Plans)
+    Returns a score and detailed analysis
+    """
+    
+    # Extract text from document
+    text = ""
+    try:
+        if filename.lower().endswith('.pdf'):
+            pdf_file = io.BytesIO(base64.b64decode(file_content))
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        else:
+            text = file_content
+            
+        text = text.lower()
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Could not process document: {str(e)}",
+            "score": 0
+        }
+    
+    # Define verification checks for land documents
+    land_verification_checks = {
+        "document_type": {
+            "keywords": [
+                "certificate of occupancy", "c of o", "c.of.o", "governor's consent", 
+                "governors consent", "survey plan", "deed of assignment", "land title"
+            ],
+            "found": False,
+            "weight": 25
+        },
+        "government_authority": {
+            "keywords": [
+                "lagos state government", "federal government", "ministry of lands", 
+                "lands bureau", "governor", "surveyor general", "land registry"
+            ],
+            "found": False,
+            "weight": 20
+        },
+        "property_description": {
+            "keywords": [
+                "plot", "block", "layout", "scheme", "estate", "coordinates", 
+                "hectares", "square meters", "sq.m", "located at", "situate"
+            ],
+            "found": False,
+            "weight": 15
+        },
+        "survey_details": {
+            "keywords": [
+                "survey", "surveyor", "beacon", "coordinates", "cadastral", 
+                "triangulation", "survey plan no", "plan number", "surveyor's seal"
+            ],
+            "found": False,
+            "weight": 15
+        },
+        "owner_details": {
+            "keywords": [
+                "grantee", "assignee", "owner", "proprietor", "holder", "occupier"
+            ],
+            "found": False,
+            "weight": 10
+        },
+        "registration": {
+            "keywords": [
+                "registered", "registration", "file no", "file number", 
+                "registry", "recorded", "gazetted", "excision"
+            ],
+            "found": False,
+            "weight": 10
+        },
+        "signatures_seals": {
+            "keywords": [
+                "signature", "seal", "stamp", "commissioner", "permanent secretary", 
+                "surveyor general", "official seal"
+            ],
+            "found": False,
+            "weight": 5
+        }
+    }
+    
+    # Check for each requirement
+    total_score = 0
+    max_score = sum(check["weight"] for check in land_verification_checks.values())
+    found_elements = []
+    missing_elements = []
+    
+    for element, check in land_verification_checks.items():
+        found = any(keyword in text for keyword in check["keywords"])
+        check["found"] = found
+        
+        if found:
+            total_score += check["weight"]
+            found_elements.append(element.replace("_", " ").title())
+        else:
+            missing_elements.append(element.replace("_", " ").title())
+    
+    # Calculate percentage score
+    score = (total_score / max_score) * 100
+    
+    # Red flags specific to land documents
+    red_flags = []
+    
+    # Check for suspicious phrases
+    warning_phrases = [
+        "excision in progress", "pending excision", "family land", "community land",
+        "customary right", "under litigation", "court case", "disputed", 
+        "temporary", "provisional", "interim"
+    ]
+    
+    for phrase in warning_phrases:
+        if phrase in text:
+            red_flags.append(f"Contains warning phrase: '{phrase}'")
+    
+    # Check for missing critical elements
+    if "certificate of occupancy" not in text and "c of o" not in text and "governor's consent" not in text:
+        red_flags.append("Does not appear to be a recognized land title document")
+    
+    if len(text) < 300:
+        red_flags.append("Document appears too short for a complete land title")
+    
+    # Check for proper formatting indicators
+    if "file no" not in text and "registration" not in text:
+        red_flags.append("Missing registration or file number")
+    
+    # Determine document status
+    if score >= 75:
+        status = "Likely Authentic"
+        color = "green"
+    elif score >= 50:
+        status = "Needs Verification"
+        color = "orange"
+    else:
+        status = "Suspicious"
+        color = "red"
+    
+    return {
+        "status": "success",
+        "verification_result": {
+            "document_type": "land_title",
+            "score": round(score, 1),
+            "status": status,
+            "color": color,
+            "found_elements": found_elements,
+            "missing_elements": missing_elements,
+            "red_flags": red_flags,
+            "recommendations": generate_land_recommendations(score, missing_elements, red_flags, text)
+        }
+    }
+
+def generate_land_recommendations(score, missing_elements, red_flags, text):
+    """Generate recommendations for land title documents"""
+    recommendations = []
+    
+    if score < 50:
+        recommendations.append("Document requires thorough verification with state Lands Registry")
+    
+    if "Document Type" in missing_elements:
+        recommendations.append("Verify this is a legitimate land title document")
+    
+    if "Government Authority" in missing_elements:
+        recommendations.append("Confirm document is issued by proper government authority")
+    
+    if "Survey Details" in missing_elements:
+        recommendations.append("Ensure survey plan details are included and verified")
+    
+    if "Registration" in missing_elements:
+        recommendations.append("Verify document is properly registered with Lands Registry")
+    
+    # Nigerian-specific land verification advice
+    recommendations.append("Always verify at the state Lands Registry before purchase")
+    recommendations.append("Conduct a search at the Corporate Affairs Commission if dealing with corporate entities")
+    
+    if "excision" in text.lower():
+        recommendations.append("For excision lands, ensure excision process is complete and gazetted")
+    
+    if "survey plan" in text.lower():
+        recommendations.append("Verify survey plan with Surveyor General's office")
+    
+    if red_flags:
+        recommendations.append("Address all red flag issues before proceeding with transaction")
+    
+    if score >= 75:
+        recommendations.append("Document appears authentic but still requires registry verification")
+    else:
+        recommendations.append("Consider engaging a qualified estate surveyor for verification")
+    
+    return recommendations
+
+# ============================================================================
+# SEPARATE API ROUTES FOR EACH DOCUMENT TYPE
+# ============================================================================
+
+# Route specifically for tenancy agreement upload and verification
+@app.route("/upload-tenancy-agreement", methods=["POST"])
+def upload_tenancy_agreement():
+    """Upload and verify tenancy agreement documents"""
+    try:
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        
+        file = request.files['file']
+        user_id = request.form.get('user_id')
+        
+        if file.filename == '' or not user_id:
+            return jsonify({"error": "File and user ID are required"}), 400
+        
+        # Check if user exists
+        if not User.query.get(user_id):
+            return jsonify({"error": "User not found"}), 404
+        
+        # Validate file type
+        allowed_extensions = {'pdf', 'doc', 'docx', 'txt'}
+        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
+            return jsonify({"error": "File type not supported. Use PDF, DOC, DOCX, or TXT"}), 400
+        
+        # Read and process file
+        file_content = file.read()
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        # Check for duplicate
+        if Document.query.filter_by(file_hash=file_hash).first():
+            return jsonify({"error": "Document already exists in the system"}), 409
+        
+        # Convert to base64 for verification
+        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+        
+        # Run tenancy agreement verification
+        verification_result = verify_tenancy_agreement(file_content_b64, file.filename)
+        
+        if verification_result["status"] == "error":
+            return jsonify(verification_result), 400
+        
+        # Map status to your enum
+        verification_data = verification_result["verification_result"]
+        status_mapping = {
+            "Likely Authentic": "Original",
+            "Needs Review": "Pending", 
+            "Suspicious": "Fake"
+        }
+        
+        # Save to database
+        new_document = Document(
+            filename=file.filename,
+            file_hash=file_hash,
+            user_id=int(user_id),
+            originality_status=status_mapping.get(verification_data["status"], "Pending")
+        )
+        
+        db.session.add(new_document)
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": "Tenancy agreement uploaded and verified successfully",
+            "document_type": "Tenancy Agreement",
+            "document": {
+                "id": new_document.id,
+                "filename": new_document.filename,
+                "status": new_document.originality_status,
+                "uploaded_at": new_document.uploaded_at.isoformat()
+            },
+            "verification": verification_data
+        }), 201
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Upload failed: {str(e)}"
+        }), 500
+
+# Route specifically for land title upload and verification
+@app.route("/upload-land-title", methods=["POST"])
+def upload_land_title():
+    """Upload and verify land title documents (C of O, Governor's Consent, etc.)"""
+    try:
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        
+        file = request.files['file']
+        user_id = request.form.get('user_id')
+        
+        if file.filename == '' or not user_id:
+            return jsonify({"error": "File and user ID are required"}), 400
+        
+        # Check if user exists
+        if not User.query.get(user_id):
+            return jsonify({"error": "User not found"}), 404
+        
+        # Validate file type
+        allowed_extensions = {'pdf', 'doc', 'docx', 'txt'}
+        if not ('.' in file.filename and file.filename.rsplit('.', 1)[1].lower() in allowed_extensions):
+            return jsonify({"error": "File type not supported. Use PDF, DOC, DOCX, or TXT"}), 400
+        
+        # Read and process file
+        file_content = file.read()
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        # Check for duplicate
+        if Document.query.filter_by(file_hash=file_hash).first():
+            return jsonify({"error": "Document already exists in the system"}), 409
+        
+        # Convert to base64 for verification
+        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+        
+        # Run land title verification
+        verification_result = verify_land_title_document(file_content_b64, file.filename)
+        
+        if verification_result["status"] == "error":
+            return jsonify(verification_result), 400
+        
+        # Map status to your enum
+        verification_data = verification_result["verification_result"]
+        status_mapping = {
+            "Likely Authentic": "Original",
+            "Needs Verification": "Pending", 
+            "Suspicious": "Fake"
+        }
+        
+        # Save to database
+        new_document = Document(
+            filename=file.filename,
+            file_hash=file_hash,
+            user_id=int(user_id),
+            originality_status=status_mapping.get(verification_data["status"], "Pending")
+        )
+        
+        db.session.add(new_document)
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": "Land title document uploaded and verified successfully",
+            "document_type": "Land Title Document",
+            "document": {
+                "id": new_document.id,
+                "filename": new_document.filename,
+                "status": new_document.originality_status,
+                "uploaded_at": new_document.uploaded_at.isoformat()
+            },
+            "verification": verification_data
+        }), 201
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Upload failed: {str(e)}"
+        }), 500
+
+# Get user documents with their verification status
+@app.route("/api/user-documents/<int:user_id>", methods=["GET"])
+def get_user_documents(user_id):
+    """Get all documents uploaded by a user with their verification status"""
+    try:
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        documents = Document.query.filter_by(user_id=user_id).order_by(Document.uploaded_at.desc()).all()
+        
+        documents_data = []
+        for doc in documents:
+            documents_data.append({
+                "id": doc.id,
+                "filename": doc.filename,
+                "status": doc.originality_status,
+                "uploaded_at": doc.uploaded_at.isoformat(),
+                "file_hash": doc.file_hash[:16] + "..."  # Show partial hash for security
+            })
+        
+        return jsonify({
+            "success": True,
+            "user": f"{user.first_name} {user.last_name}",
+            "total_documents": len(documents_data),
+            "documents": documents_data
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch documents: {str(e)}"
+        }), 500
+
+            
 if __name__ == "__main__":
     app.run(port=5000, debug=True)
