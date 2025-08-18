@@ -17,6 +17,8 @@ SpeechRecognition
 pyttsx3
 google-generativeai
 fuzzywuzzy==0.18.0
+psycopg2-binary
+
 
  
 
