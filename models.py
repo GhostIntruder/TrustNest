@@ -19,9 +19,9 @@ class Document(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     filename = db.Column(db.String(200), nullable=False)
-    file_hash = db.Column(db.String(64), unique=True, nullable=False)  # SHA256 hash
+    file_hash = db.Column(db.String(64), nullable=False)  # SHA256 hash
     originality_status = db.Column(
-        Enum("Pending", "Original", "Duplicate", "Fake", name="originality_status_enum"),
+        Enum("Pending", "Verified", "Caution", "Flagged", name="originality_status_enum"),
         default="Pending",
         nullable=False
     )
