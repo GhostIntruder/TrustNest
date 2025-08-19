@@ -1,25 +1,24 @@
 from secureNest_backend import app, db
 from sqlalchemy import text
 
-
 with app.app_context():
-    # This will drop all tables in the connected database
-    db.drop_all()
-
-    # This will create all tables again based on your models
-    db.create_all()
+    print("Beginning database reset...")
     
-with app.app_context():
-    # Drop the enum type if it exists
+    # 1. Drop a specific custom type if it exists to prevent errors on drop_all()
     try:
-        db.session.execute(text("DROP TYPE IF EXISTS originality_status_enum"))
+        db.session.execute(text("DROP TYPE IF EXISTS originality_status_enum CASCADE"))
         db.session.commit()
         print("Dropped enum type successfully")
     except Exception as e:
         print(f"Error dropping enum: {e}")
         db.session.rollback()
     
-    # Reset all tables
+    # 2. Drop all tables
     db.drop_all()
+    print("All tables dropped.")
+    
+    # 3. Create all tables again
     db.create_all()
+    print("All tables created.")
+    
     print("Database reset complete!")
