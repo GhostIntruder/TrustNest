@@ -27,7 +27,7 @@ class Document(db.Model):
     )
     uploaded_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     user = db.relationship("User", backref=db.backref("documents", lazy=True))
     
     # New verification fields (optional - add these if you want detailed verification data)
