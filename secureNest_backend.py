@@ -579,7 +579,7 @@ def upload_and_verify_survey():
         verification_data = verification_result["verification_result"]
         status_mapping = {
             "Verified": "Verified",
-            "Caution": "Cautious", 
+            "Caution": "Caution", 
             "Flagged": "Flagged"
         }
         
