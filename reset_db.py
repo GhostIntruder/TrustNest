@@ -1,6 +1,14 @@
 from secureNest_backend import app, db
 from sqlalchemy import text
 
+
+with app.app_context():
+    # This will drop all tables in the connected database
+    db.drop_all()
+
+    # This will create all tables again based on your models
+    db.create_all()
+    
 with app.app_context():
     # Drop the enum type if it exists
     try:
